@@ -22,15 +22,10 @@ type Settings struct {
 		Queue string `yaml:"queue"`
 	 } `yaml:"amqp"`
 	Rrd struct {
-		FilePath string `yaml:"file_path"`
+		FilePathFmt string `yaml:"file_path_fmt"`
 		Step uint `yaml:"step"`
 		Heartbeat uint `yaml:"heartbeat"`
 	}
-}
-
-type RrdRequest struct {
-	At int64 `yaml:"at"`
-	Values []float64 `yaml:"values`
 }
 
 func failOnError(err error, msg string) {
@@ -40,27 +35,62 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func dumpJson(title string, value interface{}) {
-	j, _ := json.Marshal(value)
-	log.Printf("%s : %s\n", title, string(j))
-}
-
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
+var s Settings
+var startTime float64 = .0
+var queue = make(map[uint]chan RrdRequest)
+
+type RrdRequest struct {
+	Id uint `yaml:"id"`
+	At int64 `yaml:"at"`
+	Values []float64 `yaml:"values`
+}
+
+func processRequest(id uint) {
+	var err error
+	var path = fmt.Sprintf(s.Rrd.FilePathFmt, id)
+	for req := range queue[id] {
+		if !fileExists(path) {
+			log.Printf("Creating RRD file: %s", path)
+			c := rrd.NewCreator(path, time.Unix(req.At - 1, .0), s.Rrd.Step)
+			c.RRA("AVERAGE", 0.5, 1, 60)
+			c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+			c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+			c.DS("value3", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+			err = c.Create(true)
+			failOnError(err, "Failed to create RRD file")
+		}
+
+		log.Printf("Updating RRD file: %s @ %d", path, req.At);
+		updater := rrd.NewUpdater(path)
+		err = updater.Update(time.Unix(req.At, .0), req.Values[0], req.Values[1], req.Values[2])
+		failOnError(err, "Failed to update RRD file")
+
+		var dt = float64(time.Now().UnixNano()) / 1e9 - startTime
+		log.Printf("%f [sec]", dt);
+	}
+}
+
+func (req *RrdRequest) onAmqpMessage() {
+	if startTime == .0 { startTime = float64(time.Now().UnixNano()) / 1e9 }
+	if queue[req.Id] == nil {
+		queue[req.Id] = make(chan RrdRequest, 60)
+		go processRequest(req.Id)
+	}
+	queue[req.Id] <- *req
+}
+
 func main() {
 	var err error
-	var s Settings
 
 	data, err := ioutil.ReadFile("settings.yml")
 	failOnError(err, "Failed to load settings")
 	err = yaml.Unmarshal([]byte(data), &s)
 	failOnError(err, "Failed to unmarshall settings")
-	//dumpJson("Settings loaded\n%s\n", s)
-
-	_ = os.Remove(s.Rrd.FilePath)
 
 	var port uint16 = 5672
 	if s.Amqp.Port != nil { port = *s.Amqp.Port }
@@ -72,12 +102,7 @@ func main() {
 		s.Amqp.Host,
 		port,
 	)
-	log.Printf(
-		"Connecting to amqp://%s@%s:%d",
-		s.Amqp.User,
-		s.Amqp.Host,
-		port,
-	)
+	log.Printf("Connecting to %s", location)
 	conn, err := amqp.Dial(location)
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
@@ -88,8 +113,8 @@ func main() {
 
 	_, err = ch.QueueDeclare(
 		s.Amqp.Queue, // queue
-		true, // durable
-		false, // delete when usused
+		true,  // durable
+		false, // delete when unused
 		false, // exclusive
 		false, // no-wait
 		nil,   // arguments
@@ -99,7 +124,7 @@ func main() {
 	msgs, err := ch.Consume(
 		s.Amqp.Queue, // queue
 		"",     // consumer
-		true,   // auto-ack
+		false,  // auto-ack
 		false,  // exclusive
 		false,  // no-local
 		false,  // no-wait
@@ -110,27 +135,14 @@ func main() {
 	forever := make(chan bool)
 
 	go func() {
-		for d := range msgs {
+		for msg := range msgs {
 			var req RrdRequest
-			_ = json.Unmarshal(d.Body, &req)
-			dumpJson("Received a message", req)
-
-			if !fileExists(s.Rrd.FilePath) {
-				c := rrd.NewCreator(s.Rrd.FilePath, time.Unix(req.At - 1, .0), s.Rrd.Step)
-				c.RRA("AVERAGE", 0.5, 1, 60)
-				c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-				c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-				c.DS("value3", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-				err = c.Create(true)
-				failOnError(err, "Failed to create RRD file")
-			}
-
-			updater := rrd.NewUpdater(s.Rrd.FilePath)
-			err = updater.Update(time.Unix(req.At, .0), req.Values[0], req.Values[1], req.Values[2])
-			failOnError(err, "Failed to update RRD file")
+			_ = json.Unmarshal(msg.Body, &req)
+			log.Printf("Received a message %v", req)
+			req.onAmqpMessage()
 		}
 	}()
 
-	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+	log.Printf("Waiting for messages")
 	<-forever
 }
