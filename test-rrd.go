@@ -2,29 +2,29 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"io/ioutil"
+	"log"
 
-	"github.com/ziutek/rrd"
-	"github.com/streadway/amqp"
-	"gopkg.in/yaml.v2"
 	"encoding/json"
+	"github.com/streadway/amqp"
+	"github.com/ziutek/rrd"
+	"gopkg.in/yaml.v2"
 	"os"
 	"time"
 )
 
 type Settings struct {
 	Amqp struct {
-		Host string `yaml:"host"`
-		Port *uint16 `yaml:"port"`
-		User string `yaml:"user"`
-		Pass string `yaml:"pass"`
-		Queue string `yaml:"queue"`
-	 } `yaml:"amqp"`
+		Host  string  `yaml:"host"`
+		Port  *uint16 `yaml:"port"`
+		User  string  `yaml:"user"`
+		Pass  string  `yaml:"pass"`
+		Queue string  `yaml:"queue"`
+	} `yaml:"amqp"`
 	Rrd struct {
 		FilePathFmt string `yaml:"file_path_fmt"`
-		Step uint `yaml:"step"`
-		Heartbeat uint `yaml:"heartbeat"`
+		Step        uint   `yaml:"step"`
+		Heartbeat   uint   `yaml:"heartbeat"`
 	}
 }
 
@@ -45,8 +45,8 @@ var startTime float64 = .0
 var queue = make(map[uint]chan RrdRequest)
 
 type RrdRequest struct {
-	Id uint `yaml:"id"`
-	At int64 `yaml:"at"`
+	Id     uint      `yaml:"id"`
+	At     int64     `yaml:"at"`
 	Values []float64 `yaml:"values`
 }
 
@@ -56,7 +56,7 @@ func processRequest(id uint) {
 	for req := range queue[id] {
 		if !fileExists(path) {
 			log.Printf("Creating RRD file: %s", path)
-			c := rrd.NewCreator(path, time.Unix(req.At - 1, .0), s.Rrd.Step)
+			c := rrd.NewCreator(path, time.Unix(req.At-1, .0), s.Rrd.Step)
 			c.RRA("AVERAGE", 0.5, 1, 60)
 			c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
 			c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
@@ -65,18 +65,20 @@ func processRequest(id uint) {
 			failOnError(err, "Failed to create RRD file")
 		}
 
-		log.Printf("Updating RRD file: %s @ %d", path, req.At);
+		log.Printf("Updating RRD file: %s @ %d", path, req.At)
 		updater := rrd.NewUpdater(path)
 		err = updater.Update(time.Unix(req.At, .0), req.Values[0], req.Values[1], req.Values[2])
 		failOnError(err, "Failed to update RRD file")
 
-		var dt = float64(time.Now().UnixNano()) / 1e9 - startTime
-		log.Printf("%f [sec]", dt);
+		var dt = float64(time.Now().UnixNano())/1e9 - startTime
+		log.Printf("%f [sec]", dt)
 	}
 }
 
 func (req *RrdRequest) onAmqpMessage() {
-	if startTime == .0 { startTime = float64(time.Now().UnixNano()) / 1e9 }
+	if startTime == .0 {
+		startTime = float64(time.Now().UnixNano()) / 1e9
+	}
 	if queue[req.Id] == nil {
 		queue[req.Id] = make(chan RrdRequest, 60)
 		go processRequest(req.Id)
@@ -93,7 +95,9 @@ func main() {
 	failOnError(err, "Failed to unmarshall settings")
 
 	var port uint16 = 5672
-	if s.Amqp.Port != nil { port = *s.Amqp.Port }
+	if s.Amqp.Port != nil {
+		port = *s.Amqp.Port
+	}
 
 	location := fmt.Sprintf(
 		"amqp://%s:%s@%s:%d",
@@ -113,22 +117,22 @@ func main() {
 
 	_, err = ch.QueueDeclare(
 		s.Amqp.Queue, // queue
-		true,  // durable
-		false, // delete when unused
-		false, // exclusive
-		false, // no-wait
-		nil,   // arguments
+		true,         // durable
+		false,        // delete when unused
+		false,        // exclusive
+		false,        // no-wait
+		nil,          // arguments
 	)
 	failOnError(err, "Failed to declare a queue")
 
 	msgs, err := ch.Consume(
 		s.Amqp.Queue, // queue
-		"",     // consumer
-		false,  // auto-ack
-		false,  // exclusive
-		false,  // no-local
-		false,  // no-wait
-		nil,    // args
+		"",           // consumer
+		false,        // auto-ack
+		false,        // exclusive
+		false,        // no-local
+		false,        // no-wait
+		nil,          // args
 	)
 	failOnError(err, "Failed to register a consumer")
 
