@@ -1,0 +1,9 @@
+[submodule "vendor/github.com/streadway/amqp"]
+	path = vendor/github.com/streadway/amqp
+	url = https://github.com/streadway/amqp
+[submodule "vendor/github.com/ziutek/rrd"]
+	path = vendor/github.com/ziutek/rrd
+	url = https://github.com/ziutek/rrd
+[submodule "vendor/gopkg.in/yaml.v2"]
+	path = vendor/gopkg.in/yaml.v2
+	url = https://gopkg.in/yaml.v2
