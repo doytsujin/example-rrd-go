@@ -19,30 +19,31 @@ $mq->queue_declare(1, $s->{amqp}->{queue}, {durable=>1, auto_delete=>0});
 
 my $maxid = 20;
 my $len = 60;
-my @sequence = ();
-my %last = ();
-my $t0 = time;
-for (my $id=1; $id <= $maxid; $id++) {
-	$last{$id} = 0;
-	for (my $t=0; $t<$len; $t++) {
-		push @sequence, $id;
+my $t0 = 1489710600;
+my $msgid = 0;
+for (my $t=0; $t<$len; $t++) {
+	for (my $id=1; $id <= $maxid; $id++) {
+		my $v = $t / $len;
+		my $payload = {
+			"id" => int($id),
+			"at" => $t0 + $t * 60,
+			"values" => [
+				sqrt($v),
+				$v,
+				$v * $v
+			]
+		};
+		$mq->publish(
+			1,
+			$s->{amqp}->{queue},
+			JSON->new->encode($payload),
+			undef,
+			{
+				"delivery_mode" => 2,
+				"message_id" => "msg-" . ++$msgid
+			}
+		);
 	}
-} 
-@sequence = List::Util::shuffle @sequence;
-
-foreach my $id (@sequence) {
-	my $t = $last{$id}++;
-	my $v = $t / $len;
-	my $payload = {
-		"id" => int($id),
-		"at" => $t0 + $t,
-		"values" => [
-			sqrt($v),
-			$v,
-			$v * $v
-		]
-	};
-	$mq->publish(1, $s->{amqp}->{queue}, JSON->new->encode($payload));
 }
 
 $mq->disconnect();

@@ -5,7 +5,7 @@ cd data
 
 for f in *.rrd; do
 	end=$( rrdtool info "$f" | grep last_update | cut -d' ' -f3 )
-	rrdtool graph "${f%.rrd}.png" --end=$end --start end-60s --width 800 \
+	rrdtool graph "${f%.rrd}.png" --end=$end --start end-60m --width 800 \
 		"DEF:value1=$f:value1:AVERAGE" \
 		"DEF:value2=$f:value2:AVERAGE" \
 		"DEF:value3=$f:value3:AVERAGE" \
