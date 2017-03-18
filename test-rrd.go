@@ -10,14 +10,14 @@ import (
 	"github.com/ziutek/rrd"
 	"gopkg.in/yaml.v2"
 	"os"
+	"reflect"
 	"runtime"
 	"time"
-	"reflect"
 )
 
 const (
 	messageCountLimit = 1200
-	channelCapacity = 20
+	channelCapacity   = 20
 )
 
 type Settings struct {
@@ -57,11 +57,11 @@ var ch *amqp.Channel
 var done chan bool
 
 type RrdRequest struct {
-	Id     uint      `yaml:"id"`
-	At     int64     `yaml:"at"`
-	Values []float64 `yaml:"values`
+	Id          uint      `yaml:"id"`
+	At          int64     `yaml:"at"`
+	Values      []float64 `yaml:"values`
 	DeliveryTag uint64
-	MsgId  string
+	MsgId       string
 }
 
 func processRequest(rrdId uint) {
@@ -175,7 +175,7 @@ func main() {
 		for dlv := range msgs {
 			var req RrdRequest
 			err := json.Unmarshal(dlv.Body, &req)
-			panicIf(err, "Failed to unmarshal message: " + string(dlv.Body))
+			panicIf(err, "Failed to unmarshal message: "+string(dlv.Body))
 			req.DeliveryTag = dlv.DeliveryTag
 			req.MsgId = dlv.MessageId
 			received++
