@@ -10,9 +10,10 @@ import (
 	"github.com/ziutek/rrd"
 	"gopkg.in/yaml.v2"
 	"os"
-	"reflect"
 	"runtime"
 	"time"
+	"sync/atomic"
+	"sync"
 )
 
 const (
@@ -37,7 +38,7 @@ type Settings struct {
 
 func panicIf(err error, msg string) {
 	if err != nil {
-		str := fmt.Sprintf("%s: (%s) %s", msg, reflect.TypeOf(err), err)
+		str := fmt.Sprintf("%s (%T) : %s", msg, err, err)
 		log.Fatal(str)
 		panic(str)
 	}
@@ -50,9 +51,9 @@ func fileExists(path string) bool {
 
 var s Settings
 var startTime float64 = .0
-var count int = 0
+var count int64 = 0
 var queue = make(map[uint]chan RrdRequest)
-var acked int = 0
+var acked int64 = 0
 var ch *amqp.Channel
 var done chan bool
 
@@ -64,20 +65,30 @@ type RrdRequest struct {
 	MsgId       string
 }
 
+var createRrdFileUnleessMutex sync.Mutex
+
+func createRrdFileUnless(req RrdRequest) string {
+	createRrdFileUnleessMutex.Lock()
+	defer createRrdFileUnleessMutex.Unlock()
+	path := fmt.Sprintf(s.Rrd.FilePathFmt, req.Id)
+	if !fileExists(path) {
+		//log.Printf("Creating RRD file: %s", path)
+		c := rrd.NewCreator(path, time.Unix(req.At-1, .0), s.Rrd.Step)
+		c.RRA("AVERAGE", 0.5, 1, 60*60)
+		c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+		c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+		c.DS("value3", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
+		err := c.Create(true)
+		panicIf(err, "Failed to create RRD file")
+	}
+	return path
+}
+
+
 func processRequest(rrdId uint) {
 	var err error
-	var path = fmt.Sprintf(s.Rrd.FilePathFmt, rrdId)
 	for req := range queue[rrdId] {
-		if !fileExists(path) {
-			//log.Printf("Creating RRD file: %s", path)
-			c := rrd.NewCreator(path, time.Unix(req.At-1, .0), s.Rrd.Step)
-			c.RRA("AVERAGE", 0.5, 1, 60*60)
-			c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-			c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-			c.DS("value3", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
-			err = c.Create(true)
-			panicIf(err, "Failed to create RRD file")
-		}
+		path := createRrdFileUnless(req)
 
 		//log.Printf("Updating RRD file: %s @ %d", path, req.At)
 		updater := rrd.NewUpdater(path)
@@ -86,8 +97,8 @@ func processRequest(rrdId uint) {
 		}
 		panicIf(err, "Failed to update RRD file")
 
-		acked++
-		log.Printf("%d: Sending ack: id=%s tag=%x", acked, req.MsgId, req.DeliveryTag)
+		currentAcked := atomic.AddInt64(&acked, 1)
+		log.Printf("%d: Sending ack: id=%s tag=%x", currentAcked, req.MsgId, req.DeliveryTag)
 		err := ch.Ack(req.DeliveryTag, false)
 		panicIf(err, "Failed to send ack")
 		if acked == messageCountLimit {
@@ -95,12 +106,16 @@ func processRequest(rrdId uint) {
 		}
 
 		var dt = float64(time.Now().UnixNano())/1e9 - startTime
-		count++
-		log.Printf("%d: %f [sec]", count, dt)
+		currentCount := atomic.AddInt64(&count, 1)
+		log.Printf("%d: %f [sec]", currentCount, dt)
 	}
 }
 
-func (req *RrdRequest) onAmqpMessage() {
+var onReceiveMutex sync.Mutex
+
+func (req *RrdRequest) onReceive() {
+	onReceiveMutex.Lock()
+	defer onReceiveMutex.Unlock()
 	if startTime == .0 {
 		startTime = float64(time.Now().UnixNano()) / 1e9
 	}
@@ -113,7 +128,7 @@ func (req *RrdRequest) onAmqpMessage() {
 
 func main() {
 	var err error
-	received := 0
+	var received int64 = 0
 	done = make(chan bool)
 
 	data, err := ioutil.ReadFile("settings.yml")
@@ -178,9 +193,9 @@ func main() {
 			panicIf(err, "Failed to unmarshal message: "+string(dlv.Body))
 			req.DeliveryTag = dlv.DeliveryTag
 			req.MsgId = dlv.MessageId
-			received++
-			log.Printf("%d: Received a message: id=%s", received, dlv.MessageId)
-			req.onAmqpMessage()
+			currentReceived := atomic.AddInt64(&received, 1)
+			log.Printf("%d: Received a message: id=%s", currentReceived, dlv.MessageId)
+			req.onReceive()
 			runtime.Gosched()
 		}
 	}()
