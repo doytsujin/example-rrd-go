@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	messageCountLimit = 1200
+	messageCountLimit = 6000
 	channelCapacity   = 20
 )
 
