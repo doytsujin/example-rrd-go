@@ -2,6 +2,7 @@
 settings.yml
 *.rrd
 *.png
+debug
 
 # Created by https://www.gitignore.io/api/osx,windows,intellij,code,sublimetext,go
 

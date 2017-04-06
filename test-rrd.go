@@ -6,22 +6,23 @@ import (
 	"log"
 
 	"encoding/json"
+	"os"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/pkg/errors"
 	"github.com/streadway/amqp"
 	"github.com/ziutek/rrd"
 	"gopkg.in/yaml.v2"
-	"os"
-	"runtime"
-	"time"
-	"sync/atomic"
-	"sync"
 )
 
 const (
 	messageCountLimit = 6000
-	channelCapacity   = 100
 )
 
-type Settings struct {
+type settings struct {
 	Amqp struct {
 		Host  string  `yaml:"host"`
 		Port  *uint16 `yaml:"port"`
@@ -36,41 +37,32 @@ type Settings struct {
 	}
 }
 
-func panicIf(err error, msg string) {
-	if err != nil {
-		str := fmt.Sprintf("%s (%T) : %s", msg, err, err)
-		log.Fatal(str)
-		panic(str)
-	}
-}
-
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
-var s Settings
-var startTime float64 = .0
-var count int64 = 0
-var queue = make(map[uint]chan RrdRequest)
-var acked int64 = 0
+var s settings
+var startTime float64
+var queue = make(map[uint]chan rrdRequest)
+var queueMutex sync.Mutex
 var ch *amqp.Channel
-var done chan bool
+var done chan struct{}
 
-type RrdRequest struct {
-	Id          uint      `yaml:"id"`
+type rrdRequest struct {
+	ID          uint      `yaml:"id"`
 	At          int64     `yaml:"at"`
-	Values      []float64 `yaml:"values`
+	Values      []float64 `yaml:"values"`
 	DeliveryTag uint64
-	MsgId       string
+	MsgID       string
 }
 
 var createRrdFileUnleessMutex sync.Mutex
 
-func createRrdFileUnless(req RrdRequest) string {
+func createRrdFileUnless(req rrdRequest) string {
 	createRrdFileUnleessMutex.Lock()
 	defer createRrdFileUnleessMutex.Unlock()
-	path := fmt.Sprintf(s.Rrd.FilePathFmt, req.Id)
+	path := fmt.Sprintf(s.Rrd.FilePathFmt, req.ID)
 	if !fileExists(path) {
 		//log.Printf("Creating RRD file: %s", path)
 		c := rrd.NewCreator(path, time.Unix(req.At-1, .0), s.Rrd.Step)
@@ -79,15 +71,19 @@ func createRrdFileUnless(req RrdRequest) string {
 		c.DS("value2", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
 		c.DS("value3", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
 		err := c.Create(true)
-		panicIf(err, "Failed to create RRD file")
+		if err != nil {
+			panic(errors.Wrap(err, "Failed to create RRD file"))
+		}
 	}
 	return path
 }
 
+var count int64
+var acked int64
 
-func processRequest(rrdId uint) {
+func processRequest(rrdID uint) {
 	var err error
-	for req := range queue[rrdId] {
+	for req := range queue[rrdID] {
 		path := createRrdFileUnless(req)
 
 		//log.Printf("Updating RRD file: %s @ %d", path, req.At)
@@ -95,14 +91,18 @@ func processRequest(rrdId uint) {
 		for i := int64(0); i < 60; i++ {
 			err = updater.Update(time.Unix(req.At+i, .0), req.Values[0], req.Values[1], req.Values[2])
 		}
-		panicIf(err, "Failed to update RRD file")
+		if err != nil {
+			panic(errors.Wrap(err, "Failed to update RRD file"))
+		}
 
 		currentAcked := atomic.AddInt64(&acked, 1)
-		log.Printf("%d: Sending ack: id=%s tag=%x", currentAcked, req.MsgId, req.DeliveryTag)
+		log.Printf("%d: Sending ack: id=%s tag=%x", currentAcked, req.MsgID, req.DeliveryTag)
 		err := ch.Ack(req.DeliveryTag, false)
-		panicIf(err, "Failed to send ack")
+		if err != nil {
+			panic(errors.Wrap(err, "Failed to send ack"))
+		}
 		if acked == messageCountLimit {
-			done <- true
+			close(done)
 		}
 
 		var dt = float64(time.Now().UnixNano())/1e9 - startTime
@@ -111,30 +111,57 @@ func processRequest(rrdId uint) {
 	}
 }
 
-var onReceiveMutex sync.Mutex
-
-func (req *RrdRequest) onReceive() {
-	onReceiveMutex.Lock()
-	defer onReceiveMutex.Unlock()
+func (req *rrdRequest) onReceive() {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
 	if startTime == .0 {
 		startTime = float64(time.Now().UnixNano()) / 1e9
 	}
-	if queue[req.Id] == nil {
-		queue[req.Id] = make(chan RrdRequest, channelCapacity)
-		go processRequest(req.Id)
+	if queue[req.ID] == nil {
+		queue[req.ID] = make(chan rrdRequest)
+		go processRequest(req.ID)
 	}
-	queue[req.Id] <- *req
+	queue[req.ID] <- *req
+}
+
+func handleMessages(msgs <-chan amqp.Delivery) {
+	var received int64
+	for dlv := range msgs {
+		var req rrdRequest
+		err := json.Unmarshal(dlv.Body, &req)
+		if err != nil {
+			panic(errors.Wrap(err, "Failed to unmarshal message: "+string(dlv.Body)))
+		}
+		req.DeliveryTag = dlv.DeliveryTag
+		req.MsgID = dlv.MessageId
+		currentReceived := atomic.AddInt64(&received, 1)
+		log.Printf("%d: Received a message: id=%s", currentReceived, dlv.MessageId)
+		go req.onReceive()
+		runtime.Gosched()
+	}
 }
 
 func main() {
+	defer func() {
+		err := recover()
+		if err != nil {
+			str := fmt.Sprintf("%T : %s", err, err)
+			log.Fatal(str)
+			panic(err)
+		}
+	}()
+
 	var err error
-	var received int64 = 0
-	done = make(chan bool)
+	done = make(chan struct{})
 
 	data, err := ioutil.ReadFile("settings.yml")
-	panicIf(err, "Failed to load settings")
-	err = yaml.Unmarshal([]byte(data), &s)
-	panicIf(err, "Failed to unmarshall settings")
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to load settings"))
+	}
+	err = yaml.Unmarshal(data, &s)
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to unmarshall settings"))
+	}
 
 	var port uint16 = 5672
 	if s.Amqp.Port != nil {
@@ -150,11 +177,15 @@ func main() {
 	)
 	log.Printf("Connecting to %s", location)
 	conn, err := amqp.Dial(location)
-	panicIf(err, "Failed to connect to RabbitMQ")
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to connect to RabbitMQ"))
+	}
 	defer conn.Close()
 
 	ch, err = conn.Channel()
-	panicIf(err, "Failed to open a channel")
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to open a channel"))
+	}
 	defer ch.Close()
 
 	chOnClose := make(chan *amqp.Error)
@@ -173,7 +204,9 @@ func main() {
 		false,        // no-wait
 		nil,          // arguments
 	)
-	panicIf(err, "Failed to declare a queue")
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to declare a queue"))
+	}
 
 	msgs, err := ch.Consume(
 		s.Amqp.Queue, // queue
@@ -184,21 +217,11 @@ func main() {
 		false,        // no-wait
 		nil,          // args
 	)
-	panicIf(err, "Failed to register a consumer")
+	if err != nil {
+		panic(errors.Wrap(err, "Failed to register a consumer"))
+	}
 
-	go func() {
-		for dlv := range msgs {
-			var req RrdRequest
-			err := json.Unmarshal(dlv.Body, &req)
-			panicIf(err, "Failed to unmarshal message: "+string(dlv.Body))
-			req.DeliveryTag = dlv.DeliveryTag
-			req.MsgId = dlv.MessageId
-			currentReceived := atomic.AddInt64(&received, 1)
-			log.Printf("%d: Received a message: id=%s", currentReceived, dlv.MessageId)
-			req.onReceive()
-			runtime.Gosched()
-		}
-	}()
+	go handleMessages(msgs)
 
 	log.Printf("Waiting for messages")
 	<-done
