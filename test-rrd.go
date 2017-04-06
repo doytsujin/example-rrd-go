@@ -18,7 +18,7 @@ import (
 
 const (
 	messageCountLimit = 6000
-	channelCapacity   = 20
+	channelCapacity   = 100
 )
 
 type Settings struct {
