@@ -45,7 +45,6 @@ func fileExists(path string) bool {
 var s settings
 var startTime float64
 var queue = make(map[uint]chan rrdRequest)
-var queueMutex sync.Mutex
 var ch *amqp.Channel
 var done chan struct{}
 
@@ -112,8 +111,6 @@ func processRequest(rrdID uint) {
 }
 
 func (req *rrdRequest) onReceive() {
-	queueMutex.Lock()
-	defer queueMutex.Unlock()
 	if startTime == .0 {
 		startTime = float64(time.Now().UnixNano()) / 1e9
 	}
@@ -136,7 +133,7 @@ func handleMessages(msgs <-chan amqp.Delivery) {
 		req.MsgID = dlv.MessageId
 		currentReceived := atomic.AddInt64(&received, 1)
 		log.Printf("%d: Received a message: id=%s", currentReceived, dlv.MessageId)
-		go req.onReceive()
+		req.onReceive()
 		runtime.Gosched()
 	}
 }
