@@ -99,7 +99,7 @@ func processRequest(rrdID uint) {
 			panic(errors.Wrap(err, "Failed to send ack"))
 		}
 
-		fmt.Printf(" %5d\n\033[1A", currentAcked)
+		fmt.Printf("%d / %d\n\033[1A", currentAcked, messageCountLimit)
 		if acked == messageCountLimit {
 			var dt = float64(time.Now().UnixNano())/1e9 - startTime
 			fmt.Printf("Sent the last ack: %f [sec]\n", dt)
