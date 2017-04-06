@@ -142,15 +142,6 @@ func handleMessages(msgs <-chan amqp.Delivery) {
 }
 
 func main() {
-	defer func() {
-		err := recover()
-		if err != nil {
-			str := fmt.Sprintf("%T : %s", err, err)
-			log.Fatal(str)
-			panic(err)
-		}
-	}()
-
 	var err error
 	done = make(chan struct{})
 
