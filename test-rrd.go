@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 
 	"encoding/json"
 	"os"
@@ -63,7 +62,7 @@ func createRrdFileUnless(req rrdRequest) string {
 	defer createRrdFileUnleessMutex.Unlock()
 	path := fmt.Sprintf(s.Rrd.FilePathFmt, req.ID)
 	if !fileExists(path) {
-		//log.Printf("Creating RRD file: %s", path)
+		//fmt.Printf("Creating RRD file: %s\n", path)
 		c := rrd.NewCreator(path, time.Unix(req.At-1, .0), s.Rrd.Step)
 		c.RRA("AVERAGE", 0.5, 1, 60*60)
 		c.DS("value1", "GAUGE", s.Rrd.Heartbeat, .0, 1.0)
@@ -77,7 +76,6 @@ func createRrdFileUnless(req rrdRequest) string {
 	return path
 }
 
-var count int64
 var acked int64
 
 func processRequest(rrdID uint) {
@@ -85,7 +83,7 @@ func processRequest(rrdID uint) {
 	for req := range queue[rrdID] {
 		path := createRrdFileUnless(req)
 
-		//log.Printf("Updating RRD file: %s @ %d", path, req.At)
+		//fmt.Printf("Updating RRD file: %s @ %d\n", path, req.At)
 		updater := rrd.NewUpdater(path)
 		for i := int64(0); i < 60; i++ {
 			err = updater.Update(time.Unix(req.At+i, .0), req.Values[0], req.Values[1], req.Values[2])
@@ -95,23 +93,24 @@ func processRequest(rrdID uint) {
 		}
 
 		currentAcked := atomic.AddInt64(&acked, 1)
-		log.Printf("%d: Sending ack: id=%s tag=%x", currentAcked, req.MsgID, req.DeliveryTag)
+		// fmt.Printf("%d: Sending ack: id=%s tag=%x\n", currentAcked, req.MsgID, req.DeliveryTag)
 		err := ch.Ack(req.DeliveryTag, false)
 		if err != nil {
 			panic(errors.Wrap(err, "Failed to send ack"))
 		}
+
+		fmt.Printf(" %5d\n\033[1A", currentAcked)
 		if acked == messageCountLimit {
+			var dt = float64(time.Now().UnixNano())/1e9 - startTime
+			fmt.Printf("Sent the last ack: %f [sec]\n", dt)
 			close(done)
 		}
-
-		var dt = float64(time.Now().UnixNano())/1e9 - startTime
-		currentCount := atomic.AddInt64(&count, 1)
-		log.Printf("%d: %f [sec]", currentCount, dt)
 	}
 }
 
 func (req *rrdRequest) onReceive() {
 	if startTime == .0 {
+		fmt.Printf("Received the first message\n")
 		startTime = float64(time.Now().UnixNano()) / 1e9
 	}
 	if queue[req.ID] == nil {
@@ -132,7 +131,7 @@ func handleMessages(msgs <-chan amqp.Delivery) {
 		req.DeliveryTag = dlv.DeliveryTag
 		req.MsgID = dlv.MessageId
 		currentReceived := atomic.AddInt64(&received, 1)
-		log.Printf("%d: Received a message: id=%s", currentReceived, dlv.MessageId)
+		_ = currentReceived // fmt.Printf("%d: Received a message: id=%s\n", currentReceived, dlv.MessageId)
 		req.onReceive()
 		runtime.Gosched()
 	}
@@ -163,7 +162,7 @@ func main() {
 		s.Amqp.Host,
 		port,
 	)
-	log.Printf("Connecting to %s", location)
+	fmt.Printf("Connecting to %s\n", location)
 	conn, err := amqp.Dial(location)
 	if err != nil {
 		panic(errors.Wrap(err, "Failed to connect to RabbitMQ"))
@@ -180,7 +179,7 @@ func main() {
 	ch.NotifyClose(chOnClose)
 	go func() {
 		for err := range chOnClose {
-			log.Printf("Channel closed: %+v", err)
+			fmt.Printf("Channel closed: %+v\n", err)
 		}
 	}()
 
@@ -211,6 +210,6 @@ func main() {
 
 	go handleMessages(msgs)
 
-	log.Printf("Waiting for messages")
+	fmt.Printf("Waiting for messages\n")
 	<-done
 }
